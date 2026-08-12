@@ -605,13 +605,7 @@ def main():
             print("\n\n👋 Interruption par l'utilisateur. Au revoir !")
             break
 
-def generer_reponse(mot_par_mot=True):
-    reponse = "Ceci est une réponse générée par l'IA."
-    if mot_par_mot:
-        for mot in reponse.split():
-            yield mot + " "
-    else:
-        yield reponse
+
 
 if __name__ == "__main__":
     main()
