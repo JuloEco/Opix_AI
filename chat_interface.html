@@ -63,6 +63,8 @@
             border-radius: 18px;
             line-height: 1.5;
             animation: fadeIn 0.3s ease;
+            white-space: pre-wrap;
+            word-wrap: break-word;
         }
 
         .message.user {
@@ -128,6 +130,7 @@
             transition: border-color 0.3s, box-shadow 0.3s;
             resize: none;
             max-height: 120px;
+            font-family: inherit;
         }
 
         .chat-input:focus {
@@ -258,6 +261,10 @@
                 font-size: 1.4rem;
             }
 
+            .chat-header .subtitle {
+                font-size: 0.8rem;
+            }
+
             .chat-input-container {
                 padding: 15px;
             }
@@ -306,10 +313,8 @@
     </div>
 
     <script>
-        // Configuration
-        const SERVER_URL = window.location.hostname === 'localhost' ? 
-            'http://localhost:5000' : 
-            window.location.origin;
+        // Configuration - utilise le même port que le serveur
+        const SERVER_URL = window.location.origin || 'http://localhost:5000';
         
         // State
         let conversationId = 'default_' + Date.now();
@@ -361,6 +366,14 @@
                     if (data.status === 'ok') {
                         connectionStatus.classList.add('connected');
                         statusText.textContent = 'Connected';
+                        
+                        // Si le modèle n'est pas chargé, afficher un message
+                        if (!data.model_loaded) {
+                            addMessage(
+                                "⚠️ Le modèle n'est pas chargé. Vérifiez que chat_model.pt et fr_bpe_tokenizer.json existent dans le dossier.",
+                                'system'
+                            );
+                        }
                     } else {
                         connectionStatus.classList.remove('connected');
                         statusText.textContent = 'Disconnected';
@@ -369,33 +382,38 @@
                 .catch(() => {
                     connectionStatus.classList.remove('connected');
                     statusText.textContent = 'Disconnected';
+                    addMessage(
+                        "❌ Impossible de se connecter au serveur. Vérifiez que app.py est lancé.",
+                        'system'
+                    );
                 });
         }
 
         // Setup EventSource for streaming
         function setupEventSource() {
+            // Fermer l'ancienne connexion si elle existe
+            if (eventSource) {
+                eventSource.close();
+            }
+            
             eventSource = new EventSource(`${SERVER_URL}/stream?conversation_id=${conversationId}`);
             
             eventSource.onmessage = function(e) {
                 const data = JSON.parse(e.data);
                 
-                if (data.type === 'word') {
-                    // Append word to the last assistant message
+                if (data.type === 'user') {
+                    // Message utilisateur
+                    addMessage(data.text, 'user');
+                } else if (data.type === 'assistant') {
+                    // Message assistant - mettre à jour le dernier message
                     const lastMessage = chatMessages.lastElementChild;
                     if (lastMessage && lastMessage.classList.contains('assistant')) {
-                        lastMessage.textContent += ' ' + data.word;
+                        lastMessage.textContent = data.text;
+                    } else {
+                        addMessage(data.text, 'assistant');
                     }
-                } else if (data.type === 'chunk') {
-                    // Append chunk to the last assistant message
-                    const lastMessage = chatMessages.lastElementChild;
-                    if (lastMessage && lastMessage.classList.contains('assistant')) {
-                        lastMessage.textContent += data.chunk;
-                    }
-                } else if (data.type === 'start') {
-                    // Create new assistant message
-                    addMessage(data.text, 'assistant');
                 } else if (data.type === 'end') {
-                    // End of message
+                    // Fin du message
                     hideTypingIndicator();
                     isProcessing = false;
                     sendButton.disabled = false;
@@ -449,7 +467,7 @@
             })
             .catch(error => {
                 console.error('Error:', error);
-                addMessage('Erreur de connexion au serveur', 'system');
+                addMessage('❌ Erreur de connexion au serveur. Vérifiez que app.py est lancé.', 'system');
                 hideTypingIndicator();
                 isProcessing = false;
                 sendButton.disabled = false;
