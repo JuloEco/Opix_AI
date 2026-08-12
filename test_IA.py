@@ -607,5 +607,84 @@ def main():
 
 
 
-if __name__ == "__main__":
-    main()
+
+
+def send_to_app_server(
+    text: str, 
+    server_url: str = "http://localhost:5000",
+    conversation_id: str = "default",
+    word_by_word: bool = True
+) -> bool:
+    """
+    Envoie le texte vers le serveur app.py.
+    
+    Args:
+        text: Texte à envoyer
+        server_url: URL du serveur Flask
+        conversation_id: Identifiant de la conversation
+        word_by_word: Si True, envoie mot par mot. Si False, envoie en une fois.
+    
+    Returns:
+        True si l'envoi a réussi, False sinon
+    """
+    import requests
+    import time
+    
+    try:
+        if word_by_word:
+            # Envoyer mot par mot
+            words = text.split()
+            for word in words:
+                data = {
+                    "conversation_id": conversation_id,
+                    "word": word,
+                    "timestamp": time.time()
+                }
+                response = requests.post(
+                    f"{server_url}/receive_word",
+                    json=data,
+                    timeout=1.0
+                )
+                if response.status_code != 200:
+                    print(f"Erreur lors de l'envoi du mot '{word}': {response.status_code}")
+                    return False
+                time.sleep(0.05)  # Petite pause pour simuler le streaming
+            
+            # Envoyer un signal de fin
+            end_data = {
+                "conversation_id": conversation_id,
+                "word": "",
+                "end_of_message": True,
+                "timestamp": time.time()
+            }
+            requests.post(
+                f"{server_url}/receive_word",
+                json=end_data,
+                timeout=1.0
+            )
+        else:
+            # Envoyer en une fois
+            data = {
+                "conversation_id": conversation_id,
+                "chunk": text,
+                "timestamp": time.time()
+            }
+            response = requests.post(
+                f"{server_url}/receive_chunk",
+                json=data,
+                timeout=1.0
+            )
+            if response.status_code != 200:
+                print(f"Erreur lors de l'envoi du chunk: {response.status_code}")
+                return False
+        
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Erreur de connexion au serveur: {e}")
+        return False
+
+
+
+
+
