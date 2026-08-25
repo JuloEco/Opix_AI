@@ -7,6 +7,7 @@
 # %pip install -q datasets tokenizers torch
 
 import os
+import re
 import math
 import inspect
 import random
@@ -14,6 +15,39 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
+
+
+# ============================================================================
+# Google Drive — sauvegarde directe du tokenizer et des checkpoints
+# ============================================================================
+# Sur Colab, monte le Drive et fait pointer TOKENIZER_CACHE_PATH / CHECKPOINT_PATH
+# dedans, pour que le tokenizer entraîné et les poids du modèle survivent à la
+# fermeture de la session (au lieu de finir dans le stockage éphémère de la VM).
+# En dehors de Colab (exécution locale), on retombe simplement sur le
+# répertoire courant.
+
+DRIVE_SAVE_DIR = "/content/drive/MyDrive/mini_llm_fr"  # dossier créé automatiquement s'il n'existe pas
+
+
+def _mount_drive_and_get_save_dir(save_dir: str = DRIVE_SAVE_DIR) -> str:
+    """Monte Google Drive si on est sur Colab et renvoie le dossier de sauvegarde
+    à utiliser pour le tokenizer et les checkpoints. Hors Colab, renvoie "."
+    (répertoire courant) sans rien monter."""
+    try:
+        from google.colab import drive  # disponible uniquement sur Colab
+    except ImportError:
+        print("ℹ️ Pas sur Colab (module 'google.colab' introuvable) — "
+              "sauvegarde en local dans le répertoire courant.")
+        return "."
+
+    print("📎 Montage de Google Drive...")
+    drive.mount("/content/drive")
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"✅ Google Drive monté — tokenizer et checkpoints sauvegardés dans {save_dir}")
+    return save_dir
+
+
+_SAVE_DIR = _mount_drive_and_get_save_dir()
 
 
 # ============================================================================
@@ -42,7 +76,7 @@ class ModelArgs:
 N_STORIES = 20000          # Plafond d'histoires TinyStories-French utilisées (le dataset n'en
                             # contient qu'environ 1000 au total, donc en pratique tout est utilisé)
 TOKENIZER_VOCAB_SIZE = 16000   # Taille cible du vocabulaire du tokenizer BPE français
-TOKENIZER_CACHE_PATH = "fr_bpe_tokenizer.json"
+TOKENIZER_CACHE_PATH = os.path.join(_SAVE_DIR, "fr_bpe_tokenizer.json")
 WIKI_CONFIG = "wikitext-72"    # Plus grande des deux configs d'asi/wikitext_fr (quality + good articles)
 WIKI_MAX_CHARS = 25_000_000    # Plafond de caractères Wikipedia chargés (tokenizer + corpus LM)
 # MAX_STEPS: 1000 steps à batch=32/block=256 ne couvre qu'~1 epoch sur le corpus
@@ -58,7 +92,7 @@ MAX_LR = 3e-4
 MIN_LR = 3e-5
 EVAL_INTERVAL = 200        # Évaluation + sauvegarde du meilleur modèle tous les N steps
 GEN_INTERVAL = 400         # Génération d'un échantillon de contrôle tous les N steps
-CHECKPOINT_PATH = "best_model.pt"
+CHECKPOINT_PATH = os.path.join(_SAVE_DIR, "best_model.pt")
 SEED = 1337
 
 # Reprend l'entraînement depuis CHECKPOINT_PATH s'il existe, au lieu de
@@ -472,6 +506,79 @@ def _import_datasets_module():
         ) from e
 
 
+# ============================================================================
+# Filtre anti-LaTeX (corpus Wikipedia)
+# ============================================================================
+# Certains articles scientifiques d'asi/wikitext_fr / wikimedia/wikipedia
+# contiennent des formules LaTeX brutes non rendues (\frac{}{}, T_{ij}, $...$,
+# \begin{equation}...\end{equation}) injectées telles quelles comme texte
+# français. Un petit modèle finit par mémoriser ces motifs comme "sortie
+# plausible" et y retombe dès qu'il est incertain. On filtre ça à la source,
+# une seule fois, avant que ces paragraphes ne servent à la fois à entraîner
+# le tokenizer BPE et le corpus du modèle de langage.
+
+_LATEX_COMMAND_RE = re.compile(r"\\(?:[a-zA-Z]+|[^a-zA-Z\s])")   # \frac, \alpha, \{, \\, ...
+_LATEX_SCRIPT_RE = re.compile(r"[_^]\{[^{}]{0,80}\}")            # T_{ij}, x^{2}
+_LATEX_INLINE_MATH_RE = re.compile(r"\${1,2}[^$\n]{1,200}\${1,2}")  # $...$ ou $$...$$
+_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[a-zA-Z*]+\}")
+
+# Part du paragraphe (en caractères, approximée) occupée par du balisage LaTeX
+# brut au-delà de laquelle on considère le paragraphe entier comme pollué.
+LATEX_DROP_THRESHOLD = 0.08
+
+
+def _latex_pollution_ratio(text: str) -> float:
+    """Estime la proportion d'un paragraphe qui ressemble à du LaTeX brut non
+    rendu plutôt qu'à de la prose française."""
+    if not text:
+        return 0.0
+    matches = (
+        len(_LATEX_COMMAND_RE.findall(text))
+        + len(_LATEX_SCRIPT_RE.findall(text))
+        + len(_LATEX_INLINE_MATH_RE.findall(text))
+        + len(_LATEX_ENV_RE.findall(text))
+    )
+    # Longueur moyenne approximative d'un motif LaTeX (\frac, _{ij}, ...) — sert
+    # juste à obtenir un ratio, pas besoin d'un comptage de caractères exact.
+    approx_chars = matches * 6
+    return approx_chars / max(1, len(text))
+
+
+def _strip_latex_noise(text: str) -> str:
+    """Retire les fragments LaTeX isolés d'un paragraphe par ailleurs propre
+    (ex: une formule ponctuelle au milieu de prose), en conservant le reste."""
+    text = _LATEX_ENV_RE.sub(" ", text)
+    text = _LATEX_INLINE_MATH_RE.sub(" ", text)
+    text = _LATEX_SCRIPT_RE.sub(" ", text)
+    text = _LATEX_COMMAND_RE.sub(" ", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def filter_latex_pollution(paragraphs: list[str]) -> list[str]:
+    """Filtre anti-LaTeX appliqué à des paragraphes Wikipedia bruts.
+    - Paragraphe majoritairement formule (ratio > LATEX_DROP_THRESHOLD) -> supprimé.
+    - Formule isolée dans un paragraphe sinon propre -> fragment retiré, prose gardée.
+    - Si le nettoyage ne laisse presque rien d'exploitable, le paragraphe est supprimé.
+    """
+    cleaned = []
+    dropped = 0
+    for p in paragraphs:
+        ratio = _latex_pollution_ratio(p)
+        if ratio > LATEX_DROP_THRESHOLD:
+            dropped += 1
+            continue
+        if ratio > 0:
+            p = _strip_latex_noise(p)
+            if len(p) < 20:
+                dropped += 1
+                continue
+        cleaned.append(p)
+    if dropped:
+        print(f"🧹 Filtre anti-LaTeX: {dropped:,} paragraphe(s) pollué(s) retiré(s)/nettoyé(s) "
+              f"sur {len(paragraphs):,} ({dropped / max(1, len(paragraphs)):.1%}).")
+    return cleaned
+
+
 def _load_wikitext_fr_via_datasets(max_chars: int) -> list[str]:
     """Tentative #1: `load_dataset` direct. Fonctionne uniquement si la version de
     `datasets` installée supporte encore les scripts de chargement personnalisés
@@ -564,6 +671,7 @@ def load_wikipedia_paragraphs(max_chars: int = WIKI_MAX_CHARS) -> list[str]:
         try:
             paragraphs = loader()
             print(f"✅ {len(paragraphs):,} paragraphes chargés depuis {label}.")
+            paragraphs = filter_latex_pollution(paragraphs)
             return paragraphs
         except Exception as e:
             print(f"⚠️ Échec avec {label} ({e}).")
