@@ -1,0 +1,34 @@
+# Dépendances additionnelles pour les modules rag/ et reasoning/.
+# À fusionner avec le requirements.txt existant du projet Opsiom.
+
+faiss-cpu>=1.7.4
+sentence-transformers>=2.7.0
+numpy>=1.24
+flask>=3.0
+requests>=2.31
+
+# Remarques :
+# - faiss-cpu suffit pour démarrer (README section 7.2). Passer à faiss-gpu
+#   uniquement si le volume de documents devient un goulot d'étranglement.
+# - sentence-transformers embarque son propre torch : sur un environnement où
+#   torch est déjà installé pour Opsiom lui-même, aucun conflit de version
+#   attendu (torch>=2.x requis des deux côtés).
+# - Si sentence-transformers ne peut pas être installé (environnement très
+#   contraint), rag/embeddings.py et rag/reranker.py basculent automatiquement
+#   sur un repli sans dépendance (hashing/TF-IDF + score lexical), avec un
+#   avertissement explicite au démarrage.
+#
+# Modules tools/, memory/, router/ (README sections 8, 9, 10) : AUCUNE
+# dépendance supplémentaire. tools/python_sandbox.py utilise `resource`
+# (bibliothèque standard POSIX, absente sur Windows — le sandbox retombe
+# alors sur le seul timeout du sous-processus, voir le commentaire dans ce
+# fichier). tools/datetime_tool.py utilise `zoneinfo` (bibliothèque standard
+# depuis Python 3.9) ; sur un système sans base de fuseaux horaires installée
+# (rare sous Linux, plus fréquent sous Windows), installer `tzdata` :
+#
+#   pip install tzdata
+#
+# memory/persistent.py utilise `sqlite3` (bibliothèque standard) et réutilise
+# `rag.embeddings.EmbeddingModel` pour la recherche sémantique — donc en
+# pratique, sentence-transformers (déjà listé ci-dessus) reste recommandé
+# pour que la mémoire persistante fasse mieux qu'un repli TF-IDF.
